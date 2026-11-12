@@ -1,0 +1,6 @@
+{
+  "name": "React Native Image Resizer Studio",
+  "description": "Production-ready React Native project structure, interactive mobile simulator, and code explorer for an image resizing mobile app with file selection, dimension controls, quality sliders, and preview screen.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
