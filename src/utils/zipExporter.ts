@@ -3,10 +3,9 @@ import { RN_PROJECT_FILES } from '../data/rnProjectFiles';
 
 export async function exportReactNativeProjectZip(): Promise<Blob> {
   const zip = new JSZip();
-  const rootFolder = zip.folder('image-resizer-rn') || zip;
 
   for (const file of RN_PROJECT_FILES) {
-    rootFolder.file(file.path, file.content);
+    zip.file(file.path, file.content);
   }
 
   // Generate binary zip

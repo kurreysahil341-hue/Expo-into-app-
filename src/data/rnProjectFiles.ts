@@ -11,9 +11,7 @@ export const RN_PROJECT_FILES: RNFileDefinition[] = [
 
 on:
   push:
-    branches: [ main, master ]
   pull_request:
-    branches: [ main, master ]
   workflow_dispatch:
 
 permissions:
@@ -32,10 +30,9 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: 'npm'
 
       - name: 📦 Install Node dependencies
-        run: npm ci || npm install --legacy-peer-deps
+        run: npm install --legacy-peer-deps
 
       - name: 🔍 Run TypeScript Compiler Check
         run: npx tsc --noEmit
@@ -53,7 +50,6 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: 'npm'
 
       - name: ☕ Setup Java JDK 17
         uses: actions/setup-java@v4
@@ -70,44 +66,152 @@ jobs:
           gradle-version: '8.6'
 
       - name: 📦 Install Node dependencies
-        run: npm ci || npm install --legacy-peer-deps
+        run: npm install --legacy-peer-deps
 
-      - name: 🛠️ Ensure Android Manifest Permissions & Debug Keystore
+      - name: 🛠️ Configure Android Manifest, Patch AGP 8 Namespaces & Keystore
         run: |
           node scripts/configure-android.js
           if [ ! -f "android/app/debug.keystore" ]; then
             keytool -genkey -v -keystore android/app/debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
           fi
 
-      - name: 🔨 Build Debug & Release APKs
+      - name: 🔨 Build Release & Debug APKs
         run: |
           cd android
-          gradle assembleDebug assembleRelease --no-daemon
+          gradle assembleRelease assembleDebug --no-daemon --stacktrace
 
-      - name: 📤 Upload Debug APK to Artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: ImageResizerPro-Debug-APK
-          path: android/app/build/outputs/apk/debug/app-debug.apk
-          retention-days: 30
-
-      - name: 📤 Upload Release APK to Artifacts
+      - name: 📤 Upload Release APK (Standalone Offline APK)
         uses: actions/upload-artifact@v4
         with:
           name: ImageResizerPro-Release-APK
           path: android/app/build/outputs/apk/release/app-release.apk
           retention-days: 30
 
-      - name: 🚀 Publish APKs to GitHub Releases (on main push)
-        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+      - name: 📤 Upload Debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: ImageResizerPro-Debug-APK
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          retention-days: 30
+
+      - name: 🚀 Publish APKs to GitHub Releases
+        if: (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master') && github.event_name == 'push'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v1.0.\${{ github.run_number }}
           name: Image Resizer Pro v1.0.\${{ github.run_number }}
           body: |
             Automated React Native Android APK build via GitHub Actions (Pure React Native CLI - Zero Expo).
-            - \`app-release.apk\` (Production optimized bundle)
-            - \`app-debug.apk\` (Debug build)
+            - \`app-release.apk\` (Install this standalone APK on your Android phone)
+            - \`app-debug.apk\` (Debug build for local Metro server)
+          files: |
+            android/app/build/outputs/apk/release/app-release.apk
+            android/app/build/outputs/apk/debug/app-debug.apk
+`,
+  },
+  {
+    path: 'github-actions/android-apk.yml',
+    filename: 'android-apk.yml',
+    folder: 'github-actions',
+    category: 'config',
+    description: 'Visible mirror copy of .github/workflows/android-apk.yml (shown even if your phone/OS file manager hides dot-folders like .github)',
+    content: `name: Build Android APK (GitHub Actions)
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  typecheck:
+    name: TypeScript & Code Validation
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4
+
+      - name: 🟢 Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: 📦 Install Node dependencies
+        run: npm install --legacy-peer-deps
+
+      - name: 🔍 Run TypeScript Compiler Check
+        run: npx tsc --noEmit
+
+  build-android-apk:
+    name: Build Android APK (Gradle)
+    needs: typecheck
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4
+
+      - name: 🟢 Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: ☕ Setup Java JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: 🤖 Setup Android SDK (API 34)
+        uses: android-actions/setup-android@v3
+
+      - name: 🐘 Setup Gradle 8.6
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.6'
+
+      - name: 📦 Install Node dependencies
+        run: npm install --legacy-peer-deps
+
+      - name: 🛠️ Configure Android Manifest, Patch AGP 8 Namespaces & Keystore
+        run: |
+          node scripts/configure-android.js
+          if [ ! -f "android/app/debug.keystore" ]; then
+            keytool -genkey -v -keystore android/app/debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+          fi
+
+      - name: 🔨 Build Release & Debug APKs
+        run: |
+          cd android
+          gradle assembleRelease assembleDebug --no-daemon --stacktrace
+
+      - name: 📤 Upload Release APK (Standalone Offline APK)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ImageResizerPro-Release-APK
+          path: android/app/build/outputs/apk/release/app-release.apk
+          retention-days: 30
+
+      - name: 📤 Upload Debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: ImageResizerPro-Debug-APK
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          retention-days: 30
+
+      - name: 🚀 Publish APKs to GitHub Releases
+        if: (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master') && github.event_name == 'push'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.\${{ github.run_number }}
+          name: Image Resizer Pro v1.0.\${{ github.run_number }}
+          body: |
+            Automated React Native Android APK build via GitHub Actions (Pure React Native CLI - Zero Expo).
+            - \`app-release.apk\` (Install this standalone APK on your Android phone)
+            - \`app-debug.apk\` (Debug build for local Metro server)
           files: |
             android/app/build/outputs/apk/release/app-release.apk
             android/app/build/outputs/apk/debug/app-debug.apk
@@ -170,6 +274,47 @@ if (fs.existsSync(stringsPath)) {
   fs.writeFileSync(stringsPath, stringsXml, 'utf8');
   console.log('✅ strings.xml updated with app_name: Image Resizer Pro');
 }
+
+// Patch AGP 8+ missing namespace in third-party Android libraries (e.g. react-native-fs@2.20.0)
+const nodeModulesDir = path.join(__dirname, '..', 'node_modules');
+const libsToCheck = [
+  'react-native-fs',
+  'react-native-image-picker',
+  'react-native-share',
+  'react-native-svg',
+  'react-native-safe-area-context',
+  '@react-native-camera-roll/camera-roll',
+  '@react-native-community/slider',
+  '@bam.tech/react-native-image-resizer',
+];
+
+libsToCheck.forEach((lib) => {
+  const libAndroidDir = path.join(nodeModulesDir, lib, 'android');
+  const libGradlePath = path.join(libAndroidDir, 'build.gradle');
+  const libManifestPath = path.join(libAndroidDir, 'src', 'main', 'AndroidManifest.xml');
+
+  if (fs.existsSync(libGradlePath)) {
+    let gradleContent = fs.readFileSync(libGradlePath, 'utf8');
+    if (!/\\bnamespace\\s+['"]/.test(gradleContent) && !/\\bnamespace\\s*=/.test(gradleContent)) {
+      let pkgName = 'com.' + lib.replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
+      if (fs.existsSync(libManifestPath)) {
+        const manifestText = fs.readFileSync(libManifestPath, 'utf8');
+        const pkgMatch = manifestText.match(/package\\s*=\\s*["']([^"']+)["']/);
+        if (pkgMatch && pkgMatch[1]) {
+          pkgName = pkgMatch[1];
+        }
+      }
+      if (/android\\s*\\{/.test(gradleContent)) {
+        gradleContent = gradleContent.replace(
+          /android\\s*\\{/,
+          \`android {\\n    namespace "\${pkgName}"\`
+        );
+        fs.writeFileSync(libGradlePath, gradleContent, 'utf8');
+        console.log(\`✅ Patched AGP 8 namespace ("\${pkgName}") into \${lib}/android/build.gradle\`);
+      }
+    }
+  }
+});
 `,
   },
   {
@@ -256,7 +401,7 @@ yarn-debug.*
   "dependencies": {
     "react": "18.2.0",
     "react-native": "0.74.5",
-    "@bam.tech/react-native-image-resizer": "^3.0.7",
+    "@bam.tech/react-native-image-resizer": "^3.0.11",
     "@react-native-camera-roll/camera-roll": "^7.4.0",
     "@react-native-community/slider": "^4.5.2",
     "lucide-react-native": "^0.378.0",
@@ -310,7 +455,31 @@ yarn-debug.*
     }
 }
 
-apply plugin: "com.facebook.react.rootproject"`,
+apply plugin: "com.facebook.react.rootproject"
+
+subprojects { subproject ->
+    if (subproject.name != "app") {
+        subproject.afterEvaluate {
+            if (subproject.hasProperty("android")) {
+                subproject.android {
+                    if (namespace == null || namespace.isEmpty()) {
+                        def manifestFile = subproject.file("src/main/AndroidManifest.xml")
+                        if (manifestFile.exists()) {
+                            def parsed = new groovy.xml.XmlSlurper().parse(manifestFile)
+                            def pkg = parsed.@package.text()
+                            if (pkg) {
+                                namespace pkg
+                            }
+                        }
+                        if (namespace == null || namespace.isEmpty()) {
+                            namespace(subproject.group?.toString() ?: "com.imageresizerpro." + subproject.name.replaceAll('[^a-zA-Z0-9_]', '_'))
+                        }
+                    }
+                }
+            }
+        }
+    }
+}`,
   },
   {
     path: 'android/settings.gradle',
@@ -455,8 +624,19 @@ apply from: file("../../node_modules/@react-native-community/cli-platform-androi
     <application
       android:name=".MainApplication"
       android:label="@string/app_name"
+      android:icon="@drawable/ic_launcher"
+      android:roundIcon="@drawable/ic_launcher"
       android:allowBackup="false"
       android:theme="@style/AppTheme">
+      <provider
+        android:name="androidx.core.content.FileProvider"
+        android:authorities="\${applicationId}.fileprovider"
+        android:exported="false"
+        android:grantUriPermissions="true">
+        <meta-data
+          android:name="android.support.FILE_PROVIDER_PATHS"
+          android:resource="@xml/file_paths" />
+      </provider>
       <activity
         android:name=".MainActivity"
         android:label="@string/app_name"
@@ -471,6 +651,39 @@ apply from: file("../../node_modules/@react-native-community/cli-platform-androi
       </activity>
     </application>
 </manifest>`,
+  },
+  {
+    path: 'android/app/src/main/res/xml/file_paths.xml',
+    filename: 'file_paths.xml',
+    folder: 'android/app/src/main/res/xml',
+    category: 'config',
+    description: 'Android FileProvider path whitelist enabling secure image sharing to WhatsApp and external apps',
+    content: `<?xml version="1.0" encoding="utf-8"?>
+<paths xmlns:android="http://schemas.android.com/apk/res/android">
+    <cache-path name="shared_cache_files" path="." />
+    <external-cache-path name="shared_external_cache_files" path="." />
+    <files-path name="shared_files" path="." />
+    <external-files-path name="shared_external_files" path="." />
+</paths>`,
+  },
+  {
+    path: 'android/app/src/main/res/drawable/ic_launcher.xml',
+    filename: 'ic_launcher.xml',
+    folder: 'android/app/src/main/res/drawable',
+    category: 'config',
+    description: 'Vector Android launcher icon drawable for Image Resizer Pro APK',
+    content: `<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#0284C7"
+        android:pathData="M24,8 L84,8 A16,16 0 0,1 100,24 L100,84 A16,16 0 0,1 84,100 L24,100 A16,16 0 0,1 8,84 L8,24 A16,16 0 0,1 24,8 Z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M30,34 L78,34 L78,74 L30,74 Z M36,40 L36,64 L48,52 L58,62 L64,56 L72,64 L72,40 Z" />
+</vector>`,
   },
   {
     path: 'android/app/src/debug/AndroidManifest.xml',
@@ -664,7 +877,6 @@ import { useFilePicker } from './src/hooks/useFilePicker';
 import {
   useImageResizer,
   ResizeOptions,
-  ResizedImageResult,
 } from './src/hooks/useImageResizer';
 import { SelectedImage } from './src/types';
 
@@ -1039,6 +1251,40 @@ export interface DimensionPreset {
 }`,
   },
   {
+    path: 'src/types/modules.d.ts',
+    filename: 'modules.d.ts',
+    folder: 'src/types',
+    category: 'type',
+    description: 'TypeScript module declarations for react-native-fs and static image assets so tsc --noEmit passes cleanly in CI',
+    content: `declare module 'react-native-fs' {
+  export interface StatResult {
+    name: string | undefined;
+    path: string;
+    size: number;
+    mode: number;
+    ctime: number;
+    mtime: number;
+    originalFilepath: string;
+    isFile: () => boolean;
+    isDirectory: () => boolean;
+  }
+
+  export const DocumentDirectoryPath: string;
+  export const CachesDirectoryPath: string;
+  export const TemporaryDirectoryPath: string;
+
+  export function exists(filepath: string): Promise<boolean>;
+  export function unlink(filepath: string): Promise<void>;
+  export function stat(filepath: string): Promise<StatResult>;
+  export function readFile(filepath: string, encodingOrOptions?: string): Promise<string>;
+}
+
+declare module '*.png';
+declare module '*.jpg';
+declare module '*.jpeg';
+declare module '*.webp';`,
+  },
+  {
     path: 'src/components/FilePicker.tsx',
     filename: 'FilePicker.tsx',
     folder: 'src/components',
@@ -1046,7 +1292,7 @@ export interface DimensionPreset {
     description: 'Native photo gallery picker and camera selector with permission management',
     content: `import React from 'react';
 import { View, Text, TouchableOpacity, StyleSheet, ActivityIndicator } from 'react-native';
-import { Image, Camera, FolderOpen, Sparkles } from 'lucide-react-native';
+import { Image, Camera, FolderOpen } from 'lucide-react-native';
 import { useFilePicker } from '../hooks/useFilePicker';
 import { SelectedImage } from '../types';
 
@@ -2264,7 +2510,7 @@ export const PreviewScreen: React.FC<PreviewScreenProps> = ({
 
   /**
    * Prominent Share on WhatsApp feature:
-   * Uses react-native-share (Share.shareSingle -> Social.WHATSAPP) to deliver the binary image directly into WhatsApp
+   * Uses react-native-share (Share.shareSingle -> Social.Whatsapp) to deliver the binary image directly into WhatsApp
    * with standard Share.open and Linking (whatsapp://send) fallbacks.
    */
   const handleShareWhatsApp = async () => {
@@ -2283,7 +2529,7 @@ export const PreviewScreen: React.FC<PreviewScreenProps> = ({
         message: caption,
         url: fileUrl,
         type: mimeType,
-        social: Social.WHATSAPP,
+        social: Social.Whatsapp,
         filename: \`resized_\${result.width}x\${result.height}\`,
       });
     } catch (err: any) {
@@ -3287,7 +3533,7 @@ A high-performance, on-device image resizing and compression mobile application 
 - **Interactive Preview Screen**:
   - Side-by-side / split-screen comparison slider (\`ImagePreview\`) to inspect pixel detail before and after resizing.
   - Full attribute comparison table (resolution, byte size, format, savings).
-  - Prominent **Share on WhatsApp** button via \`react-native-share\` (\`Social.WHATSAPP\`) and native \`Linking\` fallback.
+  - Prominent **Share on WhatsApp** button via \`react-native-share\` (\`Social.Whatsapp\`) and native \`Linking\` fallback.
   - Direct saving to device Photos library via \`@react-native-camera-roll/camera-roll\`.
   - Automatic temp file cache cleanup using \`react-native-fs\`.
 
@@ -3295,10 +3541,10 @@ A high-performance, on-device image resizing and compression mobile application 
 
 This project includes \`.github/workflows/android-apk.yml\` which automatically compiles your Android APK directly on GitHub:
 
-1. Push this project to a GitHub repository on the \`main\` branch.
-2. Open the **Actions** tab on GitHub — the **Build Android APK (GitHub Actions)** workflow starts automatically.
-3. GitHub sets up Node 20, Java JDK 17, Android SDK, bootstraps the React Native 0.74.5 Gradle project, configures permissions via \`scripts/configure-android.js\`, and compiles \`app-debug.apk\`.
-4. Download the compiled **\`ImageResizerPro-Android-APK\`** artifact or grab it directly from **GitHub Releases**!
+1. Extract the exported ZIP and push all files directly to your GitHub repository **root** (ensure \`.github/workflows/android-apk.yml\` is at the root of the repo, NOT inside a nested folder).
+2. Open the **Actions** tab on GitHub — the **Build Android APK (GitHub Actions)** workflow triggers automatically on every push (and can also be started manually via **Run workflow**).
+3. GitHub sets up Node 20, Java JDK 17, Android SDK 34, and Gradle 8.6, validates TypeScript, auto-patches AGP 8 library namespaces via \`scripts/configure-android.js\`, generates \`debug.keystore\`, and compiles both \`app-release.apk\` & \`app-debug.apk\`.
+4. Download **\`ImageResizerPro-Release-APK\`** from **Actions → Artifacts** (or **GitHub Releases**) and install \`app-release.apk\` directly on your Android phone!
 
 ## 🛠️ Local Development (React Native CLI)
 

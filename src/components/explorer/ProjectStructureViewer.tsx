@@ -64,6 +64,11 @@ git push -u origin main`;
     }
   };
 
+  const handleDownloadSingleFile = (file: RNFileDefinition) => {
+    const blob = new Blob([file.content], { type: 'text/plain;charset=utf-8' });
+    downloadProjectZip(blob, file.filename);
+  };
+
   const getFileIcon = (file: RNFileDefinition) => {
     if (file.filename.endsWith('.yml') || file.filename.endsWith('.yaml')) {
       return <FileText className="w-4 h-4 text-orange-400 shrink-0" />;
@@ -105,12 +110,15 @@ git push -u origin main`;
   const folderOrder = [
     'root',
     '.github/workflows',
+    'github-actions',
     'android',
     'android/app',
     'android/gradle/wrapper',
     'android/app/src/main',
     'android/app/src/debug',
     'android/app/src/main/res/values',
+    'android/app/src/main/res/xml',
+    'android/app/src/main/res/drawable',
     'android/app/src/main/java/com/imageresizerpro',
     'scripts',
     'src/components',
@@ -296,6 +304,14 @@ git push -u origin main`;
                   {selectedFile.description}
                 </span>
                 <button
+                  onClick={() => handleDownloadSingleFile(selectedFile)}
+                  className="flex items-center gap-1.5 px-2.5 py-1 bg-sky-600/20 hover:bg-sky-600/30 text-sky-300 text-xs font-medium rounded-md border border-sky-500/30 transition-colors cursor-pointer"
+                  title="Download this file directly"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span>Download File</span>
+                </button>
+                <button
                   onClick={handleCopy}
                   className="flex items-center gap-1.5 px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium rounded-md border border-slate-700 transition-colors cursor-pointer"
                 >
@@ -399,7 +415,7 @@ git push -u origin main`;
                   <h4 className="text-sm font-bold text-white">Preview &amp; Compare (<code className="text-emerald-300">PreviewScreen.tsx</code>)</h4>
                 </div>
                 <p className="text-xs text-slate-300 leading-relaxed">
-                  Features a gesture-driven PanResponder split comparison slider, live before/after dimension &amp; file size stats, saving to photos with <code className="text-slate-200">@react-native-camera-roll/camera-roll</code>, and a prominent <strong>Share on WhatsApp</strong> button powered by <code className="text-emerald-300">react-native-share</code> (<code className="text-emerald-300">Social.WHATSAPP</code>) and <code className="text-emerald-300">Linking</code>.
+                  Features a gesture-driven PanResponder split comparison slider, live before/after dimension &amp; file size stats, saving to photos with <code className="text-slate-200">@react-native-camera-roll/camera-roll</code>, and a prominent <strong>Share on WhatsApp</strong> button powered by <code className="text-emerald-300">react-native-share</code> (<code className="text-emerald-300">Social.Whatsapp</code>) and <code className="text-emerald-300">Linking</code>.
                 </p>
               </div>
             </div>
@@ -497,7 +513,7 @@ git push -u origin main`;
               <p className="text-xs text-slate-400 mb-3 leading-relaxed">
                 1. GitHub.com par naya repository banayein (jaise <code className="text-emerald-300">image-resizer-mobile</code>).
                 <br />
-                2. Export ki gayi ZIP extract karein aur terminal mein ye commands run karein:
+                2. Export ki gayi ZIP extract karein aur dhyaan rakhein ki <code className="text-amber-300">.github/workflows/android-apk.yml</code> repo ke <strong>bilkul root</strong> par ho (kisi subfolder ke andar nahi!). Terminal mein folder ke andar jaakar ye commands run karein:
               </p>
               <div className="bg-slate-950 border border-slate-800 rounded-xl p-4 font-mono text-xs text-slate-200 space-y-1.5 overflow-x-auto">
                 <div className="text-slate-500"># Project folder mein git initialize karein</div>
@@ -547,18 +563,30 @@ git push -u origin main`;
                     </li>
                   </ul>
                 </div>
-                <button
-                  onClick={() => {
-                    const f = RN_PROJECT_FILES.find((x) => x.path === '.github/workflows/android-apk.yml');
-                    if (f) {
-                      setSelectedFile(f);
-                      setActiveTab('code');
-                    }
-                  }}
-                  className="mt-4 w-full py-1.5 px-3 bg-slate-800 hover:bg-slate-700 text-xs text-orange-300 font-semibold rounded-lg transition-colors text-center"
-                >
-                  View android-apk.yml →
-                </button>
+                <div className="mt-4 flex gap-2">
+                  <button
+                    onClick={() => {
+                      const f = RN_PROJECT_FILES.find((x) => x.path === '.github/workflows/android-apk.yml');
+                      if (f) {
+                        setSelectedFile(f);
+                        setActiveTab('code');
+                      }
+                    }}
+                    className="flex-1 py-1.5 px-2 bg-slate-800 hover:bg-slate-700 text-xs text-orange-300 font-semibold rounded-lg transition-colors text-center"
+                  >
+                    View YAML →
+                  </button>
+                  <button
+                    onClick={() => {
+                      const f = RN_PROJECT_FILES.find((x) => x.path === '.github/workflows/android-apk.yml');
+                      if (f) handleDownloadSingleFile(f);
+                    }}
+                    className="py-1.5 px-2.5 bg-orange-600/20 hover:bg-orange-600/30 border border-orange-500/30 text-xs text-orange-300 font-semibold rounded-lg transition-colors flex items-center gap-1"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    <span>Download</span>
+                  </button>
+                </div>
               </div>
 
               {/* Android Native Gradle & Kotlin Files */}
@@ -665,6 +693,9 @@ git push -u origin main`;
                 </li>
                 <li>
                   Workflow run ke andar niche <strong className="text-white">Artifacts → ImageResizerPro-Release-APK</strong> (ya <strong className="text-white">ImageResizerPro-Debug-APK</strong>) par click karke direct <code className="text-emerald-300">.apk</code> download karein — ya <strong className="text-white">Releases</strong> section se install karein!
+                </li>
+                <li>
+                  <strong className="text-amber-300">Important Tip (Hidden `.github` folder):</strong> Phone / Mac / Linux file manager mein dot-folders (<code className="text-amber-300">.github</code>) default roop se hidden hote hain — isliye ZIP me ek visible copy <code className="text-sky-300">github-actions/android-apk.yml</code> bhi di gayi hai, aur aap upar <strong>Download</strong> button se bhi seedhe <code className="text-orange-300">android-apk.yml</code> download karke GitHub par <strong>Add file → Create new file → <code>.github/workflows/android-apk.yml</code></strong> me paste kar sakte hain!
                 </li>
               </ol>
             </div>

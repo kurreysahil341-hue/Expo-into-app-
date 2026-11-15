@@ -216,7 +216,7 @@ export default function App() {
       </header>
 
       {/* Main Content Workspace */}
-      <main className="flex-1 flex overflow-hidden p-3 lg:p-6 gap-6">
+      <main className="flex-1 flex flex-col lg:flex-row overflow-y-auto lg:overflow-hidden p-3 lg:p-6 gap-6">
         {/* Left Side: Mobile App Simulator */}
         {(layoutMode === 'split' || layoutMode === 'mobile-only') && (
           <div
