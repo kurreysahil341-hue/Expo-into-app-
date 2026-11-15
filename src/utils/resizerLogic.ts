@@ -22,7 +22,7 @@ export function normalizeQuality(quality?: number): number {
 }
 
 /**
- * Builds the array of actions for expo-image-manipulator
+ * Builds the array of resize actions for native image manipulation
  */
 export function buildManipulatorActions(options: {
   width?: number;

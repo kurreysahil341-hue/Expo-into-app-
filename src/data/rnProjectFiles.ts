@@ -2,22 +2,26 @@ import { RNFileDefinition } from '../types';
 
 export const RN_PROJECT_FILES: RNFileDefinition[] = [
   {
-    path: '.github/workflows/ci.yml',
-    filename: 'ci.yml',
+    path: '.github/workflows/android-apk.yml',
+    filename: 'android-apk.yml',
     folder: '.github/workflows',
     category: 'config',
-    description: 'GitHub Actions Continuous Integration workflow for automatic type checking and Expo project validation',
-    content: `name: CI Workflow
+    description: 'Complete GitHub Actions YAML workflow to validate TypeScript, setup Java 17 + Android SDK + Gradle 8.6, sign keystore, compile Debug & Release APKs, and publish to GitHub Releases',
+    content: `name: Build Android APK (GitHub Actions)
 
 on:
   push:
     branches: [ main, master ]
   pull_request:
     branches: [ main, master ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
-  lint-and-typecheck:
-    name: Lint & Typecheck
+  typecheck:
+    name: TypeScript & Code Validation
     runs-on: ubuntu-latest
 
     steps:
@@ -30,14 +34,142 @@ jobs:
           node-version: 20
           cache: 'npm'
 
-      - name: 📦 Install dependencies
-        run: npm ci || npm install
+      - name: 📦 Install Node dependencies
+        run: npm ci || npm install --legacy-peer-deps
 
-      - name: 🔍 TypeScript Compile Check
+      - name: 🔍 Run TypeScript Compiler Check
         run: npx tsc --noEmit
 
-      - name: 🩺 Validate Expo Config
-        run: npx expo-doctor || echo "Expo doctor check completed"
+  build-android-apk:
+    name: Build Android APK (Gradle)
+    needs: typecheck
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4
+
+      - name: 🟢 Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: ☕ Setup Java JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: 🤖 Setup Android SDK (API 34)
+        uses: android-actions/setup-android@v3
+
+      - name: 🐘 Setup Gradle 8.6
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.6'
+
+      - name: 📦 Install Node dependencies
+        run: npm ci || npm install --legacy-peer-deps
+
+      - name: 🛠️ Ensure Android Manifest Permissions & Debug Keystore
+        run: |
+          node scripts/configure-android.js
+          if [ ! -f "android/app/debug.keystore" ]; then
+            keytool -genkey -v -keystore android/app/debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+          fi
+
+      - name: 🔨 Build Debug & Release APKs
+        run: |
+          cd android
+          gradle assembleDebug assembleRelease --no-daemon
+
+      - name: 📤 Upload Debug APK to Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ImageResizerPro-Debug-APK
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          retention-days: 30
+
+      - name: 📤 Upload Release APK to Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ImageResizerPro-Release-APK
+          path: android/app/build/outputs/apk/release/app-release.apk
+          retention-days: 30
+
+      - name: 🚀 Publish APKs to GitHub Releases (on main push)
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.\${{ github.run_number }}
+          name: Image Resizer Pro v1.0.\${{ github.run_number }}
+          body: |
+            Automated React Native Android APK build via GitHub Actions (Pure React Native CLI - Zero Expo).
+            - \`app-release.apk\` (Production optimized bundle)
+            - \`app-debug.apk\` (Debug build)
+          files: |
+            android/app/build/outputs/apk/release/app-release.apk
+            android/app/build/outputs/apk/debug/app-debug.apk
+`,
+  },
+  {
+    path: 'scripts/configure-android.js',
+    filename: 'configure-android.js',
+    folder: 'scripts',
+    category: 'util',
+    description: 'Automatically injects CAMERA, Gallery/Media permissions, WhatsApp package queries, and app display name into AndroidManifest.xml',
+    content: `const fs = require('fs');
+const path = require('path');
+
+const manifestPath = path.join(__dirname, '..', 'android', 'app', 'src', 'main', 'AndroidManifest.xml');
+const stringsPath = path.join(__dirname, '..', 'android', 'app', 'src', 'main', 'res', 'values', 'strings.xml');
+
+if (fs.existsSync(manifestPath)) {
+  let manifest = fs.readFileSync(manifestPath, 'utf8');
+
+  const permissions = [
+    '<uses-permission android:name="android.permission.CAMERA" />',
+    '<uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />',
+    '<uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />',
+    '<uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" />',
+  ];
+
+  permissions.forEach((perm) => {
+    const permName = perm.match(/android:name="([^"]+)"/)[1];
+    if (!manifest.includes(permName)) {
+      manifest = manifest.replace('<application', \`    \${perm}\\n    <application\`);
+    }
+  });
+
+  // Add <queries> for WhatsApp sharing on Android 11+ (API 30+)
+  if (!manifest.includes('com.whatsapp')) {
+    const queriesBlock = \`
+    <queries>
+        <package android:name="com.whatsapp" />
+        <package android:name="com.whatsapp.w4b" />
+        <intent>
+            <action android:name="android.intent.action.SEND" />
+            <data android:mimeType="image/*" />
+        </intent>
+    </queries>
+    <application\`;
+    manifest = manifest.replace('<application', queriesBlock);
+  }
+
+  fs.writeFileSync(manifestPath, manifest, 'utf8');
+  console.log('✅ AndroidManifest.xml configured with Camera, Media & WhatsApp permissions.');
+}
+
+if (fs.existsSync(stringsPath)) {
+  let stringsXml = fs.readFileSync(stringsPath, 'utf8');
+  stringsXml = stringsXml.replace(
+    /<string name="app_name">.*<\\/string>/,
+    '<string name="app_name">Image Resizer Pro</string>'
+  );
+  fs.writeFileSync(stringsPath, stringsXml, 'utf8');
+  console.log('✅ strings.xml updated with app_name: Image Resizer Pro');
+}
 `,
   },
   {
@@ -45,109 +177,405 @@ jobs:
     filename: '.gitignore',
     folder: 'root',
     category: 'config',
-    description: 'Git ignore rules to exclude node_modules, .expo cache, build outputs, and credentials from GitHub',
-    content: `# Dependencies
+    description: 'React Native CLI Git ignore rules excluding node_modules, Gradle caches, Pods, keystores, and build outputs',
+    content: `# OSX / Windows / IDE
+.DS_Store
+.vscode/
+.idea/
+*.swp
+
+# Dependencies
 node_modules/
 package-lock.json
 yarn.lock
 
-# Expo build artifacts
-.expo/
-dist/
-web-build/
+# Xcode / iOS
+build/
+*.pbxuser
+!default.pbxuser
+*.mode1v3
+!default.mode1v3
+*.mode2v3
+!default.mode2v3
+*.perspectivev3
+!default.perspectivev3
+xcuserdata
+*.xccheckout
+*.moved-aside
+DerivedData
+*.hmap
+*.ipa
+*.xcuserstate
+ios/Pods/
+ios/build/
 
-# Native directories (if prebuilding)
-android/
-ios/
+# Android / Gradle
+android/app/build/
+android/build/
+android/.gradle/
+android/local.properties
+*.apk
+*.ap_
+*.aab
+*.dex
+*.class
+*.keystore
+!debug.keystore
 
-# Environment files
-.env
-.env*.local
-
-# Debug and system files
+# Metro / React Native
+.metro-health-check*
+*.jsbundle
 npm-debug.*
 yarn-debug.*
 *.log
-.DS_Store
-.vscode/
-.idea/
-*.orig.*
+
+# Environment variables
+.env
+.env*.local
 `,
-  },
-  {
-    path: 'eas.json',
-    filename: 'eas.json',
-    folder: 'root',
-    category: 'config',
-    description: 'Expo Application Services configuration for automated cloud APK, AAB, and iOS builds',
-    content: `{
-  "cli": {
-    "version": ">= 10.0.0"
-  },
-  "build": {
-    "development": {
-      "developmentClient": true,
-      "distribution": "internal"
-    },
-    "preview": {
-      "distribution": "internal",
-      "android": {
-        "buildType": "apk"
-      }
-    },
-    "production": {
-      "android": {
-        "buildType": "app-bundle"
-      },
-      "ios": {
-        "simulator": false
-      }
-    }
-  },
-  "submit": {
-    "production": {}
-  }
-}`,
   },
   {
     path: 'package.json',
     filename: 'package.json',
     folder: 'root',
     category: 'config',
-    description: 'Project dependencies including Expo, expo-image-manipulator, image-picker, and community slider',
+    description: 'Pure React Native CLI 0.74.5 dependencies (Zero Expo) with native Android autolinking CLI packages',
     content: `{
-  "name": "image-resizer-mobile",
+  "name": "ImageResizerPro",
   "version": "1.0.0",
-  "main": "expo-router/entry",
+  "private": true,
   "scripts": {
-    "start": "expo start",
-    "android": "expo start --android",
-    "ios": "expo start --ios",
-    "web": "expo start --web",
+    "android": "react-native run-android",
+    "ios": "react-native run-ios",
+    "start": "react-native start",
     "lint": "tsc --noEmit",
-    "doctor": "npx expo-doctor"
+    "build:apk": "cd android && gradle assembleDebug",
+    "build:release": "cd android && gradle assembleRelease",
+    "configure:android": "node scripts/configure-android.js"
   },
   "dependencies": {
-    "expo": "~51.0.0",
-    "expo-status-bar": "~1.12.1",
     "react": "18.2.0",
-    "react-native": "0.74.1",
-    "expo-image-picker": "~15.0.4",
-    "expo-image-manipulator": "~12.0.4",
-    "expo-file-system": "~17.0.1",
-    "expo-media-library": "~16.0.3",
-    "expo-sharing": "~12.0.1",
-    "expo-haptics": "~13.0.1",
-    "@react-native-community/slider": "4.5.0",
+    "react-native": "0.74.5",
+    "@bam.tech/react-native-image-resizer": "^3.0.7",
+    "@react-native-camera-roll/camera-roll": "^7.4.0",
+    "@react-native-community/slider": "^4.5.2",
     "lucide-react-native": "^0.378.0",
-    "react-native-safe-area-context": "4.10.1"
+    "react-native-fs": "^2.20.0",
+    "react-native-image-picker": "^7.1.2",
+    "react-native-safe-area-context": "^4.10.1",
+    "react-native-share": "^10.2.1",
+    "react-native-svg": "^15.2.0"
   },
   "devDependencies": {
-    "@babel/core": "^7.20.0",
-    "@types/react": "~18.2.45",
-    "typescript": "~5.3.3"
+    "@babel/core": "^7.24.0",
+    "@babel/preset-env": "^7.24.0",
+    "@babel/runtime": "^7.24.0",
+    "@react-native-community/cli": "^13.6.9",
+    "@react-native-community/cli-platform-android": "^13.6.9",
+    "@react-native/babel-preset": "0.74.85",
+    "@react-native/eslint-config": "0.74.85",
+    "@react-native/metro-config": "0.74.85",
+    "@react-native/typescript-config": "0.74.85",
+    "@types/react": "^18.2.6",
+    "typescript": "5.0.4"
   },
-  "private": true
+  "engines": {
+    "node": ">=18"
+  }
+}`,
+  },
+  {
+    path: 'android/build.gradle',
+    filename: 'build.gradle',
+    folder: 'android',
+    category: 'config',
+    description: 'Top-level Android Gradle configuration defining SDK versions (API 34), Kotlin 1.9.22, and React Native Gradle plugin',
+    content: `buildscript {
+    ext {
+        buildToolsVersion = "34.0.0"
+        minSdkVersion = 23
+        compileSdkVersion = 34
+        targetSdkVersion = 34
+        ndkVersion = "26.1.10909125"
+        kotlinVersion = "1.9.22"
+    }
+    repositories {
+        google()
+        mavenCentral()
+    }
+    dependencies {
+        classpath("com.android.tools.build:gradle")
+        classpath("com.facebook.react:react-native-gradle-plugin")
+        classpath("org.jetbrains.kotlin:kotlin-gradle-plugin")
+    }
+}
+
+apply plugin: "com.facebook.react.rootproject"`,
+  },
+  {
+    path: 'android/settings.gradle',
+    filename: 'settings.gradle',
+    folder: 'android',
+    category: 'config',
+    description: 'Gradle settings linking native Android modules (ImageResizer, ImagePicker, CameraRoll, RNFS, Share, SVG)',
+    content: `rootProject.name = 'ImageResizerPro'
+apply from: file("../node_modules/@react-native-community/cli-platform-android/native_modules.gradle"); applyNativeModulesSettingsGradle(settings)
+include ':app'
+includeBuild('../node_modules/@react-native/gradle-plugin')`,
+  },
+  {
+    path: 'android/gradle.properties',
+    filename: 'gradle.properties',
+    folder: 'android',
+    category: 'config',
+    description: 'Gradle JVM memory flags, AndroidX support, and Hermes JS engine configuration',
+    content: `# Project-wide Gradle settings.
+org.gradle.jvmargs=-Xmx2048m -XX:MaxMetaspaceSize=512m
+
+# Use AndroidX libraries
+android.useAndroidX=true
+
+# Architecture & JS Engine
+newArchEnabled=false
+hermesEnabled=true
+
+# Supported ABIs for smaller APK size
+reactNativeArchitectures=armeabi-v7a,arm64-v8a,x86,x86_64`,
+  },
+  {
+    path: 'android/gradle/wrapper/gradle-wrapper.properties',
+    filename: 'gradle-wrapper.properties',
+    folder: 'android/gradle/wrapper',
+    category: 'config',
+    description: 'Gradle wrapper distribution URL pinned to Gradle 8.6 for React Native 0.74',
+    content: `distributionBase=GRADLE_USER_HOME
+distributionPath=wrapper/dists
+distributionUrl=https\\://services.gradle.org/distributions/gradle-8.6-all.zip
+networkTimeout=10000
+validateDistributionUrl=true
+zipStoreBase=GRADLE_USER_HOME
+zipStorePath=wrapper/dists`,
+  },
+  {
+    path: 'android/app/build.gradle',
+    filename: 'build.gradle',
+    folder: 'android/app',
+    category: 'config',
+    description: 'App-level Android Gradle build script configuring applicationId, signingConfigs, Hermes, and native module linking',
+    content: `apply plugin: "com.android.application"
+apply plugin: "org.jetbrains.kotlin.android"
+apply plugin: "com.facebook.react"
+
+react {
+    /* Autolinked React Native 0.74 configuration */
+}
+
+def enableProguardInReleaseBuilds = false
+def jscFlavor = 'org.webkit:android-jsc:+'
+
+android {
+    ndkVersion rootProject.ext.ndkVersion
+    buildToolsVersion rootProject.ext.buildToolsVersion
+    compileSdk rootProject.ext.compileSdkVersion
+
+    namespace "com.imageresizerpro"
+    defaultConfig {
+        applicationId "com.imageresizerpro"
+        minSdkVersion rootProject.ext.minSdkVersion
+        targetSdkVersion rootProject.ext.targetSdkVersion
+        versionCode 1
+        versionName "1.0.0"
+    }
+
+    signingConfigs {
+        debug {
+            storeFile file('debug.keystore')
+            storePassword 'android'
+            keyAlias 'androiddebugkey'
+            keyPassword 'android'
+        }
+    }
+
+    buildTypes {
+        debug {
+            signingConfig signingConfigs.debug
+        }
+        release {
+            // Uses debug keystore by default for GitHub Actions APK distribution; swap for upload keystore for Play Store
+            signingConfig signingConfigs.debug
+            minifyEnabled enableProguardInReleaseBuilds
+            proguardFiles getDefaultProguardFile("proguard-android.txt"), "proguard-rules.pro"
+        }
+    }
+}
+
+dependencies {
+    implementation("com.facebook.react:react-android")
+    if (hermesEnabled.toBoolean()) {
+        implementation("com.facebook.react:hermes-android")
+    } else {
+        implementation jscFlavor
+    }
+}
+
+apply from: file("../../node_modules/@react-native-community/cli-platform-android/native_modules.gradle"); applyNativeModulesAppBuildGradle(project)`,
+  },
+  {
+    path: 'android/app/proguard-rules.pro',
+    filename: 'proguard-rules.pro',
+    folder: 'android/app',
+    category: 'config',
+    description: 'ProGuard / R8 obfuscation rules for React Native Android release builds',
+    content: `# Add project specific ProGuard rules here.
+# React Native & Hermes rules are automatically included by the React Native Gradle Plugin.`,
+  },
+  {
+    path: 'android/app/src/main/AndroidManifest.xml',
+    filename: 'AndroidManifest.xml',
+    folder: 'android/app/src/main',
+    category: 'config',
+    description: 'Android manifest declaring Camera, Media/Gallery permissions, FileProvider/WhatsApp <queries> intents, and MainActivity',
+    content: `<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" />
+
+    <queries>
+        <package android:name="com.whatsapp" />
+        <package android:name="com.whatsapp.w4b" />
+        <intent>
+            <action android:name="android.intent.action.SEND" />
+            <data android:mimeType="image/*" />
+        </intent>
+    </queries>
+
+    <application
+      android:name=".MainApplication"
+      android:label="@string/app_name"
+      android:allowBackup="false"
+      android:theme="@style/AppTheme">
+      <activity
+        android:name=".MainActivity"
+        android:label="@string/app_name"
+        android:configChanges="keyboard|keyboardHidden|orientation|screenLayout|screenSize|smallestScreenSize|uiMode"
+        android:launchMode="singleTask"
+        android:windowSoftInputMode="adjustResize"
+        android:exported="true">
+        <intent-filter>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent-filter>
+      </activity>
+    </application>
+</manifest>`,
+  },
+  {
+    path: 'android/app/src/debug/AndroidManifest.xml',
+    filename: 'AndroidManifest.xml',
+    folder: 'android/app/src/debug',
+    category: 'config',
+    description: 'Debug Android manifest allowing cleartext Metro bundler traffic during local development',
+    content: `<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <application
+        android:usesCleartextTraffic="true"
+        tools:targetApi="28"
+        tools:ignore="GoogleAppIndexingWarning" />
+</manifest>`,
+  },
+  {
+    path: 'android/app/src/main/res/values/strings.xml',
+    filename: 'strings.xml',
+    folder: 'android/app/src/main/res/values',
+    category: 'config',
+    description: 'Android string resources setting app display name to Image Resizer Pro',
+    content: `<resources>
+    <string name="app_name">Image Resizer Pro</string>
+</resources>`,
+  },
+  {
+    path: 'android/app/src/main/res/values/styles.xml',
+    filename: 'styles.xml',
+    folder: 'android/app/src/main/res/values',
+    category: 'config',
+    description: 'Android AppTheme dark-mode compatible base theme styles',
+    content: `<resources>
+    <style name="AppTheme" parent="Theme.AppCompat.DayNight.NoActionBar">
+        <item name="android:editTextBackground">@android:color/transparent</item>
+        <item name="android:statusBarColor">#0B0F17</item>
+    </style>
+</resources>`,
+  },
+  {
+    path: 'android/app/src/main/java/com/imageresizerpro/MainActivity.kt',
+    filename: 'MainActivity.kt',
+    folder: 'android/app/src/main/java/com/imageresizerpro',
+    category: 'config',
+    description: 'Kotlin MainActivity registering ImageResizerPro root React component',
+    content: `package com.imageresizerpro
+
+import com.facebook.react.ReactActivity
+import com.facebook.react.ReactActivityDelegate
+import com.facebook.react.defaults.DefaultNewArchitectureEntryPoint.fabricEnabled
+import com.facebook.react.defaults.DefaultReactActivityDelegate
+
+class MainActivity : ReactActivity() {
+
+  override fun getMainComponentName(): String = "ImageResizerPro"
+
+  override fun createReactActivityDelegate(): ReactActivityDelegate =
+      DefaultReactActivityDelegate(this, mainComponentName, fabricEnabled)
+}`,
+  },
+  {
+    path: 'android/app/src/main/java/com/imageresizerpro/MainApplication.kt',
+    filename: 'MainApplication.kt',
+    folder: 'android/app/src/main/java/com/imageresizerpro',
+    category: 'config',
+    description: 'Kotlin MainApplication initializing SoLoader and autolinked native React Native packages',
+    content: `package com.imageresizerpro
+
+import android.app.Application
+import com.facebook.react.PackageList
+import com.facebook.react.ReactApplication
+import com.facebook.react.ReactHost
+import com.facebook.react.ReactNativeHost
+import com.facebook.react.ReactPackage
+import com.facebook.react.defaults.DefaultNewArchitectureEntryPoint.load
+import com.facebook.react.defaults.DefaultReactHost.getDefaultReactHost
+import com.facebook.react.defaults.DefaultReactNativeHost
+import com.facebook.soloader.SoLoader
+
+class MainApplication : Application(), ReactApplication {
+
+  override val reactNativeHost: ReactNativeHost =
+      object : DefaultReactNativeHost(this) {
+        override fun getPackages(): List<ReactPackage> =
+            PackageList(this).packages
+
+        override fun getJSMainModuleName(): String = "index"
+
+        override fun getUseDeveloperSupport(): Boolean = BuildConfig.DEBUG
+
+        override val isNewArchEnabled: Boolean = BuildConfig.IS_NEW_ARCHITECTURE_ENABLED
+        override val isHermesEnabled: Boolean = BuildConfig.IS_HERMES_ENABLED
+      }
+
+  override val reactHost: ReactHost
+    get() = getDefaultReactHost(applicationContext, reactNativeHost)
+
+  override fun onCreate() {
+    super.onCreate()
+    SoLoader.init(this, false)
+    if (BuildConfig.IS_NEW_ARCHITECTURE_ENABLED) {
+      load()
+    }
+  }
 }`,
   },
   {
@@ -155,67 +583,54 @@ yarn-debug.*
     filename: 'app.json',
     folder: 'root',
     category: 'config',
-    description: 'Expo configuration with iOS and Android camera and photo library permission strings',
+    description: 'Standard React Native CLI app registry name configuration',
     content: `{
-  "expo": {
-    "name": "Image Resizer Pro",
-    "slug": "image-resizer-mobile",
-    "version": "1.0.0",
-    "orientation": "portrait",
-    "icon": "./assets/icon.png",
-    "userInterfaceStyle": "automatic",
-    "splash": {
-      "image": "./assets/splash.png",
-      "resizeMode": "contain",
-      "backgroundColor": "#0F172A"
-    },
-    "ios": {
-      "supportsTablet": true,
-      "infoPlist": {
-        "NSPhotoLibraryUsageDescription": "Image Resizer needs access to your photo library to select photos for resizing.",
-        "NSPhotoLibraryAddUsageDescription": "Image Resizer needs permission to save resized photos to your photo library.",
-        "NSCameraUsageDescription": "Image Resizer needs camera access to capture new photos for resizing."
-      }
-    },
-    "android": {
-      "adaptiveIcon": {
-        "foregroundImage": "./assets/adaptive-icon.png",
-        "backgroundColor": "#0F172A"
-      },
-      "permissions": [
-        "CAMERA",
-        "READ_EXTERNAL_STORAGE",
-        "WRITE_EXTERNAL_STORAGE",
-        "READ_MEDIA_IMAGES"
-      ]
-    },
-    "plugins": [
-      [
-        "expo-image-picker",
-        {
-          "photosPermission": "The app accesses your photos to allow you to select and resize them.",
-          "cameraPermission": "The app accesses your camera to let you take photos and resize them directly."
-        }
-      ],
-      [
-        "expo-media-library",
-        {
-          "photosPermission": "Allow Image Resizer to save resized photos to your gallery.",
-          "savePhotosPermission": "Allow Image Resizer to save resized photos to your gallery."
-        }
-      ]
-    ]
-  }
+  "name": "ImageResizerPro",
+  "displayName": "Image Resizer Pro"
 }`,
+  },
+  {
+    path: 'index.js',
+    filename: 'index.js',
+    folder: 'root',
+    category: 'config',
+    description: 'Native React Native CLI root entry file registering App with AppRegistry',
+    content: `import { AppRegistry } from 'react-native';
+import App from './App';
+import { name as appName } from './app.json';
+
+AppRegistry.registerComponent(appName, () => App);`,
+  },
+  {
+    path: 'babel.config.js',
+    filename: 'babel.config.js',
+    folder: 'root',
+    category: 'config',
+    description: 'Babel configuration using @react-native/babel-preset',
+    content: `module.exports = {
+  presets: ['module:@react-native/babel-preset'],
+};`,
+  },
+  {
+    path: 'metro.config.js',
+    filename: 'metro.config.js',
+    folder: 'root',
+    category: 'config',
+    description: 'Metro bundler configuration for React Native CLI',
+    content: `const { getDefaultConfig, mergeConfig } = require('@react-native/metro-config');
+
+const config = {};
+
+module.exports = mergeConfig(getDefaultConfig(__dirname), config);`,
   },
   {
     path: 'tsconfig.json',
     filename: 'tsconfig.json',
     folder: 'root',
     category: 'config',
-    description: 'TypeScript configuration with Expo preset',
+    description: 'TypeScript configuration extending @react-native/typescript-config',
     content: `{
-  "extends": "expo/tsconfig.base",
+  "extends": "@react-native/typescript-config/tsconfig.json",
   "compilerOptions": {
     "strict": true,
     "baseUrl": ".",
@@ -1779,7 +2194,7 @@ const styles = StyleSheet.create({
     filename: 'PreviewScreen.tsx',
     folder: 'src/screens',
     category: 'screen',
-    description: 'Preview screen with before/after comparison, file size statistics, gallery export via expo-media-library, and prominent WhatsApp sharing via expo-sharing and Linking',
+    description: 'Preview screen with before/after comparison, file size statistics, gallery export via CameraRoll, and direct WhatsApp sharing via react-native-share and Linking',
     content: `import React, { useState } from 'react';
 import {
   View,
@@ -1791,6 +2206,7 @@ import {
   Linking,
   ActivityIndicator,
   Platform,
+  PermissionsAndroid,
 } from 'react-native';
 import {
   ArrowLeft,
@@ -1800,8 +2216,8 @@ import {
   Sparkles,
   CheckCircle2,
 } from 'lucide-react-native';
-import * as MediaLibrary from 'expo-media-library';
-import * as Sharing from 'expo-sharing';
+import { CameraRoll } from '@react-native-camera-roll/camera-roll';
+import Share, { Social } from 'react-native-share';
 import { ImagePreview } from '../components/ImagePreview';
 import { ProcessedResult, SelectedImage } from '../types';
 import { formatBytes, calculateSavings } from '../utils/formatters';
@@ -1838,12 +2254,18 @@ export const PreviewScreen: React.FC<PreviewScreenProps> = ({
   const targetUri = result.resizedUri || (result as any).uri;
   const format = (result.format || 'jpeg').toLowerCase();
   const mimeType = format === 'png' ? 'image/png' : format === 'webp' ? 'image/webp' : 'image/jpeg';
-  const appleUTI = format === 'png' ? 'public.png' : format === 'webp' ? 'org.webmproject.webp' : 'public.jpeg';
+
+  const ensureFileUri = (uri: string) => {
+    if (uri.startsWith('file://') || uri.startsWith('content://')) {
+      return uri;
+    }
+    return \`file://\${uri}\`;
+  };
 
   /**
    * Prominent Share on WhatsApp feature:
-   * Uses expo-sharing (Sharing.shareAsync) to deliver the binary image file directly into WhatsApp
-   * with deep Linking (whatsapp://send) as fallback if direct file sharing is unavailable.
+   * Uses react-native-share (Share.shareSingle -> Social.WHATSAPP) to deliver the binary image directly into WhatsApp
+   * with standard Share.open and Linking (whatsapp://send) fallbacks.
    */
   const handleShareWhatsApp = async () => {
     if (!targetUri) {
@@ -1852,40 +2274,41 @@ export const PreviewScreen: React.FC<PreviewScreenProps> = ({
     }
 
     setIsSharingWhatsApp(true);
+    const caption = \`Resized photo: \${result.width}x\${result.height}px (\${formatBytes(result.sizeBytes)}) via Image Resizer Pro\`;
+    const fileUrl = ensureFileUri(targetUri);
+
     try {
-      const isSharingAvailable = await Sharing.isAvailableAsync();
-
-      if (isSharingAvailable) {
-        // Direct native sheet targeting WhatsApp with MIME type and Apple Uniform Type Identifier
-        await Sharing.shareAsync(targetUri, {
-          mimeType,
-          dialogTitle: 'Share Resized Image on WhatsApp',
-          UTI: appleUTI,
-        });
-      } else {
-        // Fallback: Check native WhatsApp URI scheme via Linking
-        const whatsappUrl = 'whatsapp://send';
-        const canOpen = await Linking.canOpenURL(whatsappUrl);
-
-        if (canOpen) {
-          const caption = encodeURIComponent(
-            \`Resized photo: \${result.width}x\${result.height}px (\${formatBytes(result.sizeBytes)}) via Image Resizer Pro\`
-          );
-          await Linking.openURL(\`\${whatsappUrl}?text=\${caption}\`);
-        } else {
-          Alert.alert(
-            'WhatsApp Not Available',
-            'WhatsApp is not installed on this device or file sharing is not supported.',
-            [
-              { text: 'Cancel', style: 'cancel' },
-              { text: 'Share to Other Apps', onPress: handleShareGeneral },
-            ]
-          );
-        }
-      }
+      await Share.shareSingle({
+        title: 'Share Resized Image on WhatsApp',
+        message: caption,
+        url: fileUrl,
+        type: mimeType,
+        social: Social.WHATSAPP,
+        filename: \`resized_\${result.width}x\${result.height}\`,
+      });
     } catch (err: any) {
-      if (err.message && !err.message.includes('User cancelled')) {
-        Alert.alert('Share Failed', err.message || 'Could not complete WhatsApp share.');
+      const msg = err?.message || '';
+      if (msg.includes('User did not share') || msg.includes('cancelled')) {
+        return;
+      }
+
+      // Fallback to native whatsapp:// deep link or general share sheet
+      try {
+        const canOpen = await Linking.canOpenURL('whatsapp://send');
+        if (canOpen) {
+          await Linking.openURL(\`whatsapp://send?text=\${encodeURIComponent(caption)}\`);
+        } else {
+          await handleShareGeneral();
+        }
+      } catch {
+        Alert.alert(
+          'WhatsApp Not Available',
+          'WhatsApp could not be opened directly. Would you like to share via another app?',
+          [
+            { text: 'Cancel', style: 'cancel' },
+            { text: 'Share to Other Apps', onPress: handleShareGeneral },
+          ]
+        );
       }
     } finally {
       setIsSharingWhatsApp(false);
@@ -1899,18 +2322,15 @@ export const PreviewScreen: React.FC<PreviewScreenProps> = ({
     if (!targetUri) return;
     setIsSharingOther(true);
     try {
-      const isAvailable = await Sharing.isAvailableAsync();
-      if (isAvailable) {
-        await Sharing.shareAsync(targetUri, {
-          mimeType,
-          dialogTitle: 'Share Resized Image',
-          UTI: appleUTI,
-        });
-      } else {
-        Alert.alert('Share Unsupported', 'Sharing is not available on this platform/device.');
-      }
+      await Share.open({
+        title: 'Share Resized Image',
+        message: \`Resized image (\${result.width}x\${result.height}px, \${formatBytes(result.sizeBytes)})\`,
+        url: ensureFileUri(targetUri),
+        type: mimeType,
+        failOnCancel: false,
+      });
     } catch (err: any) {
-      if (err.message && !err.message.includes('User cancelled')) {
+      if (err?.message && !err.message.includes('User did not share')) {
         Alert.alert('Share Failed', err.message || 'Could not share image.');
       }
     } finally {
@@ -1919,7 +2339,27 @@ export const PreviewScreen: React.FC<PreviewScreenProps> = ({
   };
 
   /**
-   * Save directly to the device photo library using expo-media-library
+   * Request Android storage/media permissions before saving to Gallery
+   */
+  const requestAndroidSavePermission = async (): Promise<boolean> => {
+    if (Platform.OS !== 'android') return true;
+    const apiLevel = typeof Platform.Version === 'number' ? Platform.Version : parseInt(String(Platform.Version), 10);
+
+    if (apiLevel >= 33) {
+      const granted = await PermissionsAndroid.request(
+        PermissionsAndroid.PERMISSIONS.READ_MEDIA_IMAGES
+      );
+      return granted === PermissionsAndroid.RESULTS.GRANTED;
+    }
+
+    const granted = await PermissionsAndroid.request(
+      PermissionsAndroid.PERMISSIONS.WRITE_EXTERNAL_STORAGE
+    );
+    return granted === PermissionsAndroid.RESULTS.GRANTED;
+  };
+
+  /**
+   * Save directly to the device photo library using @react-native-camera-roll/camera-roll
    */
   const handleSaveToGallery = async () => {
     if (onSave) {
@@ -1934,28 +2374,22 @@ export const PreviewScreen: React.FC<PreviewScreenProps> = ({
 
     setInternalSaving(true);
     try {
-      const permission = await MediaLibrary.requestPermissionsAsync();
-      if (permission.granted) {
-        const asset = await MediaLibrary.saveToLibraryAsync(targetUri);
-        try {
-          const album = await MediaLibrary.getAlbumAsync('Resized Photos');
-          if (album) {
-            await MediaLibrary.addAssetsToAlbumAsync([asset], album, false);
-          } else {
-            await MediaLibrary.createAlbumAsync('Resized Photos', asset, false);
-          }
-        } catch {
-          // Fallback - asset is saved in main library
-        }
-
-        setSavedSuccessMessage('Saved to your Photos gallery!');
-        Alert.alert('Success!', 'Resized photo saved to your gallery.');
-      } else {
+      const hasPermission = await requestAndroidSavePermission();
+      if (!hasPermission) {
         Alert.alert(
           'Permission Needed',
           'Please allow photo library access in Settings to save your resized images.'
         );
+        return;
       }
+
+      await CameraRoll.saveAsset(ensureFileUri(targetUri), {
+        type: 'photo',
+        album: 'Resized Photos',
+      });
+
+      setSavedSuccessMessage('Saved to your Photos gallery!');
+      Alert.alert('Success!', 'Resized photo saved to your gallery.');
     } catch (err: any) {
       Alert.alert('Save Failed', err.message || 'Could not save photo.');
     } finally {
@@ -2350,11 +2784,12 @@ const styles = StyleSheet.create({
     filename: 'useImageResizer.ts',
     folder: 'src/hooks',
     category: 'hook',
-    description: 'Custom React hook wrapping expo-image-manipulator and expo-media-library with gallery export and memory cleanup',
+    description: 'Custom React hook wrapping @bam.tech/react-native-image-resizer, CameraRoll, and RNFS with gallery export and memory cleanup',
     content: `import { useState, useCallback, useRef, useEffect } from 'react';
-import * as ImageManipulator from 'expo-image-manipulator';
-import * as MediaLibrary from 'expo-media-library';
-import * as FileSystem from 'expo-file-system';
+import { PermissionsAndroid, Platform } from 'react-native';
+import ImageResizer from '@bam.tech/react-native-image-resizer';
+import { CameraRoll, PhotoIdentifier } from '@react-native-camera-roll/camera-roll';
+import RNFS from 'react-native-fs';
 
 export type OutputFormat = 'jpeg' | 'png' | 'webp';
 
@@ -2393,7 +2828,7 @@ export interface ResizedImageResult {
   /** Base64 string if requested */
   base64?: string;
   /** Gallery asset info if saved */
-  asset?: MediaLibrary.Asset | null;
+  asset?: PhotoIdentifier | null;
   /** Execution time in milliseconds */
   processingTimeMs: number;
 }
@@ -2406,7 +2841,7 @@ export interface UseImageResizerReturn {
   saveToGallery: (
     targetUri?: string,
     albumName?: string
-  ) => Promise<MediaLibrary.Asset | null>;
+  ) => Promise<PhotoIdentifier | null>;
   cleanupTempFiles: (specificUri?: string) => Promise<void>;
   requestGalleryPermission: () => Promise<boolean>;
   resetState: () => void;
@@ -2416,8 +2851,8 @@ export interface UseImageResizerReturn {
   isProcessing: boolean;
   error: string | null;
   result: ResizedImageResult | null;
-  savedAsset: MediaLibrary.Asset | null;
-  permissionStatus: MediaLibrary.PermissionStatus | null;
+  savedAsset: PhotoIdentifier | null;
+  permissionStatus: 'granted' | 'denied' | null;
   tempFilesCount: number;
 }
 
@@ -2429,13 +2864,17 @@ export function normalizeQuality(quality?: number): number {
   return Math.max(0.1, Math.min(1.0, quality));
 }
 
+function stripFileScheme(uri: string): string {
+  return uri.startsWith('file://') ? uri.replace('file://', '') : uri;
+}
+
 export const useImageResizer = (): UseImageResizerReturn => {
   const [isResizing, setIsResizing] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<ResizedImageResult | null>(null);
-  const [savedAsset, setSavedAsset] = useState<MediaLibrary.Asset | null>(null);
-  const [permissionStatus, setPermissionStatus] = useState<MediaLibrary.PermissionStatus | null>(null);
+  const [savedAsset, setSavedAsset] = useState<PhotoIdentifier | null>(null);
+  const [permissionStatus, setPermissionStatus] = useState<'granted' | 'denied' | null>(null);
   const [tempFilesCount, setTempFilesCount] = useState(0);
 
   // Track all generated temporary URIs for memory management & cleanup
@@ -2444,9 +2883,10 @@ export const useImageResizer = (): UseImageResizerReturn => {
   const cleanupTempFiles = useCallback(async (specificUri?: string) => {
     try {
       if (specificUri) {
-        const info = await FileSystem.getInfoAsync(specificUri);
-        if (info.exists) {
-          await FileSystem.deleteAsync(specificUri, { idempotent: true });
+        const fsPath = stripFileScheme(specificUri);
+        const exists = await RNFS.exists(fsPath);
+        if (exists) {
+          await RNFS.unlink(fsPath);
         }
         tempUrisRef.current.delete(specificUri);
       } else {
@@ -2454,9 +2894,10 @@ export const useImageResizer = (): UseImageResizerReturn => {
         await Promise.all(
           urisToDelete.map(async (uri) => {
             try {
-              const info = await FileSystem.getInfoAsync(uri);
-              if (info.exists) {
-                await FileSystem.deleteAsync(uri, { idempotent: true });
+              const fsPath = stripFileScheme(uri);
+              const exists = await RNFS.exists(fsPath);
+              if (exists) {
+                await RNFS.unlink(fsPath);
               }
             } catch {
               // Ignore single file deletion failures
@@ -2475,7 +2916,7 @@ export const useImageResizer = (): UseImageResizerReturn => {
     return () => {
       const uris = Array.from(tempUrisRef.current);
       uris.forEach((uri) => {
-        FileSystem.deleteAsync(uri, { idempotent: true }).catch(() => {});
+        RNFS.unlink(stripFileScheme(uri)).catch(() => {});
       });
       tempUrisRef.current.clear();
     };
@@ -2483,11 +2924,27 @@ export const useImageResizer = (): UseImageResizerReturn => {
 
   const requestGalleryPermission = useCallback(async (): Promise<boolean> => {
     try {
-      const { status } = await MediaLibrary.requestPermissionsAsync();
-      setPermissionStatus(status);
-      return status === MediaLibrary.PermissionStatus.GRANTED;
+      if (Platform.OS !== 'android') {
+        setPermissionStatus('granted');
+        return true;
+      }
+
+      const apiLevel = typeof Platform.Version === 'number'
+        ? Platform.Version
+        : parseInt(String(Platform.Version), 10);
+
+      const permission =
+        apiLevel >= 33
+          ? PermissionsAndroid.PERMISSIONS.READ_MEDIA_IMAGES
+          : PermissionsAndroid.PERMISSIONS.WRITE_EXTERNAL_STORAGE;
+
+      const status = await PermissionsAndroid.request(permission);
+      const isGranted = status === PermissionsAndroid.RESULTS.GRANTED;
+      setPermissionStatus(isGranted ? 'granted' : 'denied');
+      return isGranted;
     } catch (err: any) {
       setError(err.message || 'Permission request failed');
+      setPermissionStatus('denied');
       return false;
     }
   }, []);
@@ -2496,7 +2953,7 @@ export const useImageResizer = (): UseImageResizerReturn => {
     async (
       targetUri?: string,
       albumName?: string
-    ): Promise<MediaLibrary.Asset | null> => {
+    ): Promise<PhotoIdentifier | null> => {
       const uriToSave = targetUri || result?.uri;
       if (!uriToSave) {
         setError('No image available to save');
@@ -2512,17 +2969,14 @@ export const useImageResizer = (): UseImageResizerReturn => {
           throw new Error('Photo gallery permission denied. Please enable photos access in device settings.');
         }
 
-        const asset = await MediaLibrary.createAssetAsync(uriToSave);
+        const formattedUri = uriToSave.startsWith('file://') || uriToSave.startsWith('content://')
+          ? uriToSave
+          : \`file://\${uriToSave}\`;
 
-        if (albumName && albumName.trim().length > 0) {
-          const trimmedAlbum = albumName.trim();
-          const existingAlbum = await MediaLibrary.getAlbumAsync(trimmedAlbum);
-          if (existingAlbum) {
-            await MediaLibrary.addAssetsToAlbumAsync([asset], existingAlbum, false);
-          } else {
-            await MediaLibrary.createAlbumAsync(trimmedAlbum, asset, false);
-          }
-        }
+        const asset = await CameraRoll.saveAsset(formattedUri, {
+          type: 'photo',
+          album: albumName?.trim() || undefined,
+        });
 
         setSavedAsset(asset);
         return asset;
@@ -2553,8 +3007,8 @@ export const useImageResizer = (): UseImageResizerReturn => {
 
       try {
         const {
-          width,
-          height,
+          width = 1080,
+          height = 1080,
           quality = 80,
           format = 'jpeg',
           maintainAspectRatio = true,
@@ -2568,63 +3022,57 @@ export const useImageResizer = (): UseImageResizerReturn => {
           await cleanupTempFiles(result.uri);
         }
 
-        const actions: ImageManipulator.Action[] = [];
-
-        if (width || height) {
-          if (maintainAspectRatio) {
-            if (width && height) {
-              actions.push({ resize: { width, height } });
-            } else if (width) {
-              actions.push({ resize: { width } });
-            } else if (height) {
-              actions.push({ resize: { height } });
-            }
-          } else {
-            actions.push({
-              resize: {
-                width: width || undefined,
-                height: height || undefined,
-              },
-            });
-          }
-        }
-
-        const formatMap: Record<OutputFormat, ImageManipulator.SaveFormat> = {
-          jpeg: ImageManipulator.SaveFormat.JPEG,
-          png: ImageManipulator.SaveFormat.PNG,
-          webp: ImageManipulator.SaveFormat.WEBP,
+        const formatMap: Record<OutputFormat, 'JPEG' | 'PNG' | 'WEBP'> = {
+          jpeg: 'JPEG',
+          png: 'PNG',
+          webp: 'WEBP',
         };
-        const saveFormat = formatMap[format] || ImageManipulator.SaveFormat.JPEG;
-        const normalizedQuality = format === 'png' ? 1.0 : normalizeQuality(quality);
+        const compressFormat = formatMap[format] || 'JPEG';
+        const qualityPercent = format === 'png'
+          ? 100
+          : Math.round(normalizeQuality(quality) * 100);
 
-        const manipResult = await ImageManipulator.manipulateAsync(
+        const resized = await ImageResizer.createResizedImage(
           sourceUri,
-          actions,
+          width || 4096,
+          height || 4096,
+          compressFormat,
+          qualityPercent,
+          0,
+          undefined,
+          false,
           {
-            compress: normalizedQuality,
-            format: saveFormat,
-            base64,
+            mode: maintainAspectRatio ? 'contain' : 'stretch',
+            onlyScaleDown: false,
           }
         );
 
-        tempUrisRef.current.add(manipResult.uri);
+        tempUrisRef.current.add(resized.uri);
         setTempFilesCount(tempUrisRef.current.size);
 
-        const fileInfo = await FileSystem.getInfoAsync(manipResult.uri);
-        const sizeBytes = (fileInfo as any).size || 0;
+        let sizeBytes = resized.size || 0;
+        if (!sizeBytes) {
+          const stat = await RNFS.stat(stripFileScheme(resized.uri));
+          sizeBytes = Number(stat.size) || 0;
+        }
 
-        let asset: MediaLibrary.Asset | null = null;
+        let base64String: string | undefined;
+        if (base64) {
+          base64String = await RNFS.readFile(stripFileScheme(resized.uri), 'base64');
+        }
+
+        let asset: PhotoIdentifier | null = null;
         if (autoSaveToGallery) {
-          asset = await saveToGallery(manipResult.uri, albumName);
+          asset = await saveToGallery(resized.uri, albumName);
         }
 
         const processed: ResizedImageResult = {
-          uri: manipResult.uri,
-          width: manipResult.width,
-          height: manipResult.height,
+          uri: resized.uri,
+          width: resized.width,
+          height: resized.height,
           sizeBytes,
           format,
-          base64: manipResult.base64,
+          base64: base64String,
           asset,
           processingTimeMs: Date.now() - startTime,
         };
@@ -2671,48 +3119,67 @@ export const useImageResizer = (): UseImageResizerReturn => {
     filename: 'useFilePicker.ts',
     folder: 'src/hooks',
     category: 'hook',
-    description: 'Custom React hook requesting camera & gallery permissions with image extraction',
+    description: 'Pure React Native hook using react-native-image-picker and RNFS with Android/iOS camera & gallery permissions',
     content: `import { useState } from 'react';
-import * as ImagePicker from 'expo-image-picker';
-import * as FileSystem from 'expo-file-system';
+import { PermissionsAndroid, Platform } from 'react-native';
+import { launchImageLibrary, launchCamera, Asset } from 'react-native-image-picker';
+import RNFS from 'react-native-fs';
 import { SelectedImage } from '../types';
 
 export const useFilePicker = () => {
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const processPickerResult = async (asset: ImagePicker.ImagePickerAsset): Promise<SelectedImage> => {
-    const fileInfo = await FileSystem.getInfoAsync(asset.uri);
-    const sizeBytes = (fileInfo as any).size || asset.fileSize || 0;
+  const processPickerResult = async (asset: Asset): Promise<SelectedImage | null> => {
+    if (!asset.uri) return null;
+
+    let sizeBytes = asset.fileSize || 0;
+    if (!sizeBytes && asset.uri.startsWith('file://')) {
+      try {
+        const stat = await RNFS.stat(asset.uri.replace('file://', ''));
+        sizeBytes = Number(stat.size) || 0;
+      } catch {
+        sizeBytes = 0;
+      }
+    }
+
     const name = asset.fileName || \`image_\${Date.now()}.jpg\`;
 
     return {
       uri: asset.uri,
       name,
-      width: asset.width,
-      height: asset.height,
+      width: asset.width || 1080,
+      height: asset.height || 1080,
       sizeBytes,
-      mimeType: asset.mimeType || 'image/jpeg',
+      mimeType: asset.type || 'image/jpeg',
     };
+  };
+
+  const requestAndroidCameraPermission = async (): Promise<boolean> => {
+    if (Platform.OS !== 'android') return true;
+    const status = await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.CAMERA);
+    return status === PermissionsAndroid.RESULTS.GRANTED;
   };
 
   const pickFromGallery = async (): Promise<SelectedImage | null> => {
     setIsLoading(true);
     setError(null);
     try {
-      const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
-      if (status !== 'granted') {
-        setError('Permission to access photos was denied');
+      const result = await launchImageLibrary({
+        mediaType: 'photo',
+        quality: 1,
+        selectionLimit: 1,
+      });
+
+      if (result.didCancel) {
+        return null;
+      }
+      if (result.errorCode) {
+        setError(result.errorMessage || 'Error selecting photo');
         return null;
       }
 
-      const result = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: ImagePicker.MediaTypeOptions.Images,
-        allowsEditing: false,
-        quality: 1,
-      });
-
-      if (!result.canceled && result.assets && result.assets.length > 0) {
+      if (result.assets && result.assets.length > 0) {
         return await processPickerResult(result.assets[0]);
       }
       return null;
@@ -2728,19 +3195,27 @@ export const useFilePicker = () => {
     setIsLoading(true);
     setError(null);
     try {
-      const { status } = await ImagePicker.requestCameraPermissionsAsync();
-      if (status !== 'granted') {
+      const granted = await requestAndroidCameraPermission();
+      if (!granted) {
         setError('Permission to access camera was denied');
         return null;
       }
 
-      const result = await ImagePicker.launchCameraAsync({
-        mediaTypes: ImagePicker.MediaTypeOptions.Images,
-        allowsEditing: false,
+      const result = await launchCamera({
+        mediaType: 'photo',
         quality: 1,
+        saveToPhotos: false,
       });
 
-      if (!result.canceled && result.assets && result.assets.length > 0) {
+      if (result.didCancel) {
+        return null;
+      }
+      if (result.errorCode) {
+        setError(result.errorMessage || 'Error capturing photo');
+        return null;
+      }
+
+      if (result.assets && result.assets.length > 0) {
         return await processPickerResult(result.assets[0]);
       }
       return null;
@@ -2796,51 +3271,82 @@ export function calculateSavings(
     filename: 'README.md',
     folder: 'root',
     category: 'doc',
-    description: 'Complete documentation for initializing, installing, and running the project on iOS and Android',
-    content: `# Image Resizer Mobile App (React Native + Expo)
+    description: 'Complete documentation for building Android APKs directly on GitHub Actions with Pure React Native CLI (Zero Expo)',
+    content: `# Image Resizer Pro (Pure React Native CLI + GitHub Actions APK Build)
 
-A high-performance, on-device image resizing and compression application built with **React Native**, **Expo**, and TypeScript.
+A high-performance, on-device image resizing and compression mobile application built with **Pure React Native CLI (0.74.5)** and **TypeScript** — **No Expo / No EAS required**. Ready to build directly into an installable Android APK using **GitHub Actions**.
 
 ## 🚀 Features
 
-- **File Selection Component**: Gallery picker and direct camera capture with native permission handling.
+- **File Selection Component**: Native gallery picker and camera capture via \`react-native-image-picker\`.
 - **Precision Resizing Controls**:
   - Width and Height numerical inputs with aspect ratio lock and swap functionality.
   - Social & standard presets (Instagram Square, Story 9:16, 1080p FHD, 720p HD, Avatar).
   - Granular quality slider (10% to 100%) with real-time file size savings calculation.
-  - Multi-format exporter (JPEG, PNG, WEBP).
+  - Multi-format exporter (JPEG, PNG, WEBP) powered by \`@bam.tech/react-native-image-resizer\`.
 - **Interactive Preview Screen**:
   - Side-by-side / split-screen comparison slider (\`ImagePreview\`) to inspect pixel detail before and after resizing.
   - Full attribute comparison table (resolution, byte size, format, savings).
-  - Prominent **Share on WhatsApp** button via \`expo-sharing\` (binary image file) and native \`Linking\` fallback.
-  - Direct saving to native Photos library via \`expo-media-library\` with custom album creation.
-  - Standard native OS share sheet for AirDrop, messages, and other social apps.
+  - Prominent **Share on WhatsApp** button via \`react-native-share\` (\`Social.WHATSAPP\`) and native \`Linking\` fallback.
+  - Direct saving to device Photos library via \`@react-native-camera-roll/camera-roll\`.
+  - Automatic temp file cache cleanup using \`react-native-fs\`.
 
-## 🛠️ Quick Start
+## 🤖 Automated APK Build on GitHub (No Expo)
 
-### 1. Install Dependencies
+This project includes \`.github/workflows/android-apk.yml\` which automatically compiles your Android APK directly on GitHub:
+
+1. Push this project to a GitHub repository on the \`main\` branch.
+2. Open the **Actions** tab on GitHub — the **Build Android APK (GitHub Actions)** workflow starts automatically.
+3. GitHub sets up Node 20, Java JDK 17, Android SDK, bootstraps the React Native 0.74.5 Gradle project, configures permissions via \`scripts/configure-android.js\`, and compiles \`app-debug.apk\`.
+4. Download the compiled **\`ImageResizerPro-Android-APK\`** artifact or grab it directly from **GitHub Releases**!
+
+## 🛠️ Local Development (React Native CLI)
+
 \`\`\`bash
+# 1. Install dependencies
 npm install
-\`\`\`
 
-### 2. Run with Expo
-\`\`\`bash
-# Start development server
-npx expo start
+# 2. Generate native android/ios folders (first time only)
+npx @react-native-community/cli@latest init TempRN --version 0.74.5 --skip-install --skip-git-init
+cp -r TempRN/android ./android && cp -r TempRN/ios ./ios && rm -rf TempRN
+node scripts/configure-android.js
 
-# Run on iOS Simulator (macOS required)
-npx expo run:ios
-
-# Run on Android Emulator or physical device
-npx expo run:android
+# 3. Start Metro & run on Android device/emulator
+npm start
+npm run android
 \`\`\`
 
 ## 📁 Architecture Overview
 
 \`\`\`
 image-resizer-rn/
-├── app.json                     # Permissions & Expo configuration
-├── package.json                 # Dependencies
+├── .github/workflows/
+│   └── android-apk.yml          # GitHub Actions Gradle APK Builder (Debug & Release)
+├── android/
+│   ├── build.gradle             # Root Gradle & Kotlin setup (SDK 34)
+│   ├── settings.gradle          # Native module autolinking
+│   ├── gradle.properties        # Hermes & architecture flags
+│   ├── gradle/wrapper/
+│   │   └── gradle-wrapper.properties
+│   └── app/
+│       ├── build.gradle         # Application ID, signingConfigs & dependencies
+│       ├── proguard-rules.pro   # Release build rules
+│       └── src/
+│           ├── debug/AndroidManifest.xml
+│           └── main/
+│               ├── AndroidManifest.xml          # Camera, Media & WhatsApp permissions
+│               ├── res/values/strings.xml       # App display name
+│               ├── res/values/styles.xml        # Dark mode theme
+│               └── java/com/imageresizerpro/
+│                   ├── MainActivity.kt          # Root Android activity
+│                   └── MainApplication.kt       # PackageList autolinking
+├── scripts/
+│   └── configure-android.js     # AndroidManifest permissions verifier
+├── app.json                     # React Native CLI app name config
+├── index.js                     # AppRegistry entry point
+├── babel.config.js              # @react-native/babel-preset
+├── metro.config.js              # Metro bundler config
+├── package.json                 # Pure RN CLI dependencies (Zero Expo)
 ├── tsconfig.json                # TypeScript settings
 ├── App.tsx                      # Root navigation & state
 └── src/
@@ -2855,8 +3361,8 @@ image-resizer-rn/
     │   ├── ResizeScreen.tsx     # Configuration workspace
     │   └── PreviewScreen.tsx    # Inspection & export screen
     ├── hooks/
-    │   ├── useImageResizer.ts   # Expo ImageManipulator engine
-    │   └── useFilePicker.ts     # Camera & library permissions
+    │   ├── useImageResizer.ts   # Native ImageResizer + CameraRoll + RNFS
+    │   └── useFilePicker.ts     # react-native-image-picker + permissions
     ├── utils/
     │   └── formatters.ts        # Byte & percentage formatters
     └── types/

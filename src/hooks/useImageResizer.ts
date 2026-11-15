@@ -1,7 +1,8 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
-import * as ImageManipulator from 'expo-image-manipulator';
-import * as MediaLibrary from 'expo-media-library';
-import * as FileSystem from 'expo-file-system';
+import { PermissionsAndroid, Platform } from 'react-native';
+import ImageResizer from '@bam.tech/react-native-image-resizer';
+import { CameraRoll, PhotoIdentifier } from '@react-native-camera-roll/camera-roll';
+import RNFS from 'react-native-fs';
 
 export type OutputFormat = 'jpeg' | 'png' | 'webp';
 
@@ -40,7 +41,7 @@ export interface ResizedImageResult {
   /** Base64 string if requested */
   base64?: string;
   /** Gallery asset info if saved */
-  asset?: MediaLibrary.Asset | null;
+  asset?: PhotoIdentifier | null;
   /** Execution time in milliseconds */
   processingTimeMs: number;
 }
@@ -55,12 +56,12 @@ export interface UseImageResizerReturn {
   ) => Promise<ResizedImageResult | null>;
 
   /**
-   * Saves the processed image directly to the device gallery using expo-media-library.
+   * Saves the processed image directly to the device gallery using CameraRoll.
    */
   saveToGallery: (
     targetUri?: string,
     albumName?: string
-  ) => Promise<MediaLibrary.Asset | null>;
+  ) => Promise<PhotoIdentifier | null>;
 
   /**
    * Cleans up temporary cache files created during manipulation to free mobile memory.
@@ -77,20 +78,22 @@ export interface UseImageResizerReturn {
    */
   resetState: () => void;
 
-  /** True while ImageManipulator is processing */
+  /** True while ImageResizer is processing */
   isResizing: boolean;
   /** True while saving to the photo library */
   isSaving: boolean;
   /** True if resizing or saving */
   isLoading: boolean;
+  /** Alias for isResizing */
+  isProcessing: boolean;
   /** Last error message if any */
   error: string | null;
   /** The most recent resize result */
   result: ResizedImageResult | null;
   /** The saved gallery asset if successfully saved */
-  savedAsset: MediaLibrary.Asset | null;
+  savedAsset: PhotoIdentifier | null;
   /** Current media library permission status */
-  permissionStatus: MediaLibrary.PermissionStatus | null;
+  permissionStatus: 'granted' | 'denied' | null;
   /** Count of temporary cache files tracked for cleanup */
   tempFilesCount: number;
 }
@@ -106,17 +109,22 @@ export function normalizeQuality(quality?: number): number {
   return Math.max(0.1, Math.min(1.0, quality));
 }
 
+function stripFileScheme(uri: string): string {
+  return uri.startsWith('file://') ? uri.replace('file://', '') : uri;
+}
+
 /**
- * Custom React Native hook for image resizing, quality compression,
- * gallery export, and memory cleanup using expo-image-manipulator & expo-media-library.
+ * Custom Pure React Native hook for image resizing, quality compression,
+ * gallery export, and memory cleanup using @bam.tech/react-native-image-resizer,
+ * @react-native-camera-roll/camera-roll, and react-native-fs (Zero Expo).
  */
 export const useImageResizer = (): UseImageResizerReturn => {
   const [isResizing, setIsResizing] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<ResizedImageResult | null>(null);
-  const [savedAsset, setSavedAsset] = useState<MediaLibrary.Asset | null>(null);
-  const [permissionStatus, setPermissionStatus] = useState<MediaLibrary.PermissionStatus | null>(null);
+  const [savedAsset, setSavedAsset] = useState<PhotoIdentifier | null>(null);
+  const [permissionStatus, setPermissionStatus] = useState<'granted' | 'denied' | null>(null);
   const [tempFilesCount, setTempFilesCount] = useState(0);
 
   // Track all generated temporary URIs for memory management & cleanup
@@ -128,9 +136,10 @@ export const useImageResizer = (): UseImageResizerReturn => {
   const cleanupTempFiles = useCallback(async (specificUri?: string) => {
     try {
       if (specificUri) {
-        const info = await FileSystem.getInfoAsync(specificUri);
-        if (info.exists) {
-          await FileSystem.deleteAsync(specificUri, { idempotent: true });
+        const fsPath = stripFileScheme(specificUri);
+        const exists = await RNFS.exists(fsPath);
+        if (exists) {
+          await RNFS.unlink(fsPath);
         }
         tempUrisRef.current.delete(specificUri);
       } else {
@@ -138,9 +147,10 @@ export const useImageResizer = (): UseImageResizerReturn => {
         await Promise.all(
           urisToDelete.map(async (uri) => {
             try {
-              const info = await FileSystem.getInfoAsync(uri);
-              if (info.exists) {
-                await FileSystem.deleteAsync(uri, { idempotent: true });
+              const fsPath = stripFileScheme(uri);
+              const exists = await RNFS.exists(fsPath);
+              if (exists) {
+                await RNFS.unlink(fsPath);
               }
             } catch {
               // Ignore single file deletion failures
@@ -160,37 +170,52 @@ export const useImageResizer = (): UseImageResizerReturn => {
    */
   useEffect(() => {
     return () => {
-      // Execute fire-and-forget cleanup on unmount
       const uris = Array.from(tempUrisRef.current);
       uris.forEach((uri) => {
-        FileSystem.deleteAsync(uri, { idempotent: true }).catch(() => {});
+        RNFS.unlink(stripFileScheme(uri)).catch(() => {});
       });
       tempUrisRef.current.clear();
     };
   }, []);
 
   /**
-   * Requests media library permissions
+   * Requests native Android/iOS media library permissions
    */
   const requestGalleryPermission = useCallback(async (): Promise<boolean> => {
     try {
-      const { status } = await MediaLibrary.requestPermissionsAsync();
-      setPermissionStatus(status);
-      return status === MediaLibrary.PermissionStatus.GRANTED;
+      if (Platform.OS !== 'android') {
+        setPermissionStatus('granted');
+        return true;
+      }
+
+      const apiLevel = typeof Platform.Version === 'number'
+        ? Platform.Version
+        : parseInt(String(Platform.Version), 10);
+
+      const permission =
+        apiLevel >= 33
+          ? PermissionsAndroid.PERMISSIONS.READ_MEDIA_IMAGES
+          : PermissionsAndroid.PERMISSIONS.WRITE_EXTERNAL_STORAGE;
+
+      const status = await PermissionsAndroid.request(permission);
+      const isGranted = status === PermissionsAndroid.RESULTS.GRANTED;
+      setPermissionStatus(isGranted ? 'granted' : 'denied');
+      return isGranted;
     } catch (err: any) {
       setError(err.message || 'Permission request failed');
+      setPermissionStatus('denied');
       return false;
     }
   }, []);
 
   /**
-   * Saves an image directly to the device gallery using expo-media-library
+   * Saves an image directly to the device gallery using @react-native-camera-roll/camera-roll
    */
   const saveToGallery = useCallback(
     async (
       targetUri?: string,
       albumName?: string
-    ): Promise<MediaLibrary.Asset | null> => {
+    ): Promise<PhotoIdentifier | null> => {
       const uriToSave = targetUri || result?.uri;
       if (!uriToSave) {
         setError('No image available to save');
@@ -201,25 +226,20 @@ export const useImageResizer = (): UseImageResizerReturn => {
       setError(null);
 
       try {
-        // 1. Verify permissions
         const hasPermission = await requestGalleryPermission();
         if (!hasPermission) {
           throw new Error('Photo gallery permission denied. Please enable photos access in device settings.');
         }
 
-        // 2. Create asset in user's media library
-        const asset = await MediaLibrary.createAssetAsync(uriToSave);
+        const formattedUri =
+          uriToSave.startsWith('file://') || uriToSave.startsWith('content://')
+            ? uriToSave
+            : `file://${uriToSave}`;
 
-        // 3. If an album name is specified, organize into the album
-        if (albumName && albumName.trim().length > 0) {
-          const trimmedAlbum = albumName.trim();
-          const existingAlbum = await MediaLibrary.getAlbumAsync(trimmedAlbum);
-          if (existingAlbum) {
-            await MediaLibrary.addAssetsToAlbumAsync([asset], existingAlbum, false);
-          } else {
-            await MediaLibrary.createAlbumAsync(trimmedAlbum, asset, false);
-          }
-        }
+        const asset = await CameraRoll.saveAsset(formattedUri, {
+          type: 'photo',
+          album: albumName?.trim() || undefined,
+        });
 
         setSavedAsset(asset);
         return asset;
@@ -235,7 +255,7 @@ export const useImageResizer = (): UseImageResizerReturn => {
   );
 
   /**
-   * Resizes and compresses an image
+   * Resizes and compresses an image natively
    */
   const resizeImage = useCallback(
     async (
@@ -253,8 +273,8 @@ export const useImageResizer = (): UseImageResizerReturn => {
 
       try {
         const {
-          width,
-          height,
+          width = 1080,
+          height = 1080,
           quality = 80,
           format = 'jpeg',
           maintainAspectRatio = true,
@@ -264,76 +284,60 @@ export const useImageResizer = (): UseImageResizerReturn => {
           autoCleanupPrevious = true,
         } = options;
 
-        // Auto-cleanup previous temporary file if requested to optimize memory
         if (autoCleanupPrevious && result?.uri) {
           await cleanupTempFiles(result.uri);
         }
 
-        // Construct ImageManipulator resize actions
-        const actions: ImageManipulator.Action[] = [];
-
-        if (width || height) {
-          if (maintainAspectRatio) {
-            // Supplying only width or height preserves aspect ratio automatically
-            if (width && height) {
-              actions.push({ resize: { width, height } });
-            } else if (width) {
-              actions.push({ resize: { width } });
-            } else if (height) {
-              actions.push({ resize: { height } });
-            }
-          } else {
-            actions.push({
-              resize: {
-                width: width || undefined,
-                height: height || undefined,
-              },
-            });
-          }
-        }
-
-        // Format mapping
-        const formatMap: Record<OutputFormat, ImageManipulator.SaveFormat> = {
-          jpeg: ImageManipulator.SaveFormat.JPEG,
-          png: ImageManipulator.SaveFormat.PNG,
-          webp: ImageManipulator.SaveFormat.WEBP,
+        const formatMap: Record<OutputFormat, 'JPEG' | 'PNG' | 'WEBP'> = {
+          jpeg: 'JPEG',
+          png: 'PNG',
+          webp: 'WEBP',
         };
-        const saveFormat = formatMap[format] || ImageManipulator.SaveFormat.JPEG;
+        const compressFormat = formatMap[format] || 'JPEG';
+        const qualityPercent =
+          format === 'png' ? 100 : Math.round(normalizeQuality(quality) * 100);
 
-        // Normalize quality factor [0.1, 1.0]
-        const normalizedQuality = format === 'png' ? 1.0 : normalizeQuality(quality);
-
-        // Perform native image manipulation
-        const manipResult = await ImageManipulator.manipulateAsync(
+        const resized = await ImageResizer.createResizedImage(
           sourceUri,
-          actions,
+          width || 4096,
+          height || 4096,
+          compressFormat,
+          qualityPercent,
+          0,
+          undefined,
+          false,
           {
-            compress: normalizedQuality,
-            format: saveFormat,
-            base64,
+            mode: maintainAspectRatio ? 'contain' : 'stretch',
+            onlyScaleDown: false,
           }
         );
 
-        // Track the new temporary file for memory cleanup
-        tempUrisRef.current.add(manipResult.uri);
+        tempUrisRef.current.add(resized.uri);
         setTempFilesCount(tempUrisRef.current.size);
 
-        // Read physical file size from disk via FileSystem without holding buffer in JS
-        const fileInfo = await FileSystem.getInfoAsync(manipResult.uri);
-        const sizeBytes = (fileInfo as any).size || 0;
+        let sizeBytes = resized.size || 0;
+        if (!sizeBytes) {
+          const stat = await RNFS.stat(stripFileScheme(resized.uri));
+          sizeBytes = Number(stat.size) || 0;
+        }
 
-        let asset: MediaLibrary.Asset | null = null;
+        let base64String: string | undefined;
+        if (base64) {
+          base64String = await RNFS.readFile(stripFileScheme(resized.uri), 'base64');
+        }
+
+        let asset: PhotoIdentifier | null = null;
         if (autoSaveToGallery) {
-          asset = await saveToGallery(manipResult.uri, albumName);
+          asset = await saveToGallery(resized.uri, albumName);
         }
 
         const processed: ResizedImageResult = {
-          uri: manipResult.uri,
-          width: manipResult.width,
-          height: manipResult.height,
+          uri: resized.uri,
+          width: resized.width,
+          height: resized.height,
           sizeBytes,
           format,
-          base64: manipResult.base64,
+          base64: base64String,
           asset,
           processingTimeMs: Date.now() - startTime,
         };
@@ -366,6 +370,7 @@ export const useImageResizer = (): UseImageResizerReturn => {
     isResizing,
     isSaving,
     isLoading: isResizing || isSaving,
+    isProcessing: isResizing,
     error,
     result,
     savedAsset,
