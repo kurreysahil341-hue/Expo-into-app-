@@ -1,0 +1,100 @@
+name: Build Android APK (GitHub Actions)
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  typecheck:
+    name: TypeScript & Code Validation
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4
+
+      - name: 🟢 Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: 📦 Install Node dependencies
+        run: npm install --legacy-peer-deps
+
+      - name: 🔍 Run TypeScript Compiler Check
+        run: npx tsc --noEmit
+
+  build-android-apk:
+    name: Build Android APK (Gradle)
+    needs: typecheck
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4
+
+      - name: 🟢 Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: ☕ Setup Java JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: 🤖 Setup Android SDK (API 34)
+        uses: android-actions/setup-android@v3
+
+      - name: 🐘 Setup Gradle 8.6
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.6'
+
+      - name: 📦 Install Node dependencies
+        run: npm install --legacy-peer-deps
+
+      - name: 🛠️ Configure Android Manifest, Patch AGP 8 Namespaces & Keystore
+        run: |
+          node scripts/configure-android.js
+          if [ ! -f "android/app/debug.keystore" ]; then
+            keytool -genkey -v -keystore android/app/debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+          fi
+
+      - name: 🔨 Build Release & Debug APKs
+        run: |
+          cd android
+          gradle assembleRelease assembleDebug --no-daemon --stacktrace
+
+      - name: 📤 Upload Release APK (Standalone Offline APK)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ImageResizerPro-Release-APK
+          path: android/app/build/outputs/apk/release/app-release.apk
+          retention-days: 30
+
+      - name: 📤 Upload Debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: ImageResizerPro-Debug-APK
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          retention-days: 30
+
+      - name: 🚀 Publish APKs to GitHub Releases
+        if: (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master') && github.event_name == 'push'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.${{ github.run_number }}
+          name: Image Resizer Pro v1.0.${{ github.run_number }}
+          body: |
+            Automated React Native Android APK build via GitHub Actions (Pure React Native CLI - Zero Expo).
+            - `app-release.apk` (Install this standalone APK on your Android phone)
+            - `app-debug.apk` (Debug build for local Metro server)
+          files: |
+            android/app/build/outputs/apk/release/app-release.apk
+            android/app/build/outputs/apk/debug/app-debug.apk
