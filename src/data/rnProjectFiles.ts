@@ -59,6 +59,12 @@ jobs:
 
       - name: 🤖 Setup Android SDK (API 34)
         uses: android-actions/setup-android@v3
+        with:
+          accept-android-sdk-licenses: true
+          packages: |
+            platform-tools
+            platforms;android-34
+            build-tools;34.0.0
 
       - name: 🐘 Setup Gradle 8.6
         uses: gradle/actions/setup-gradle@v4
@@ -167,6 +173,12 @@ jobs:
 
       - name: 🤖 Setup Android SDK (API 34)
         uses: android-actions/setup-android@v3
+        with:
+          accept-android-sdk-licenses: true
+          packages: |
+            platform-tools
+            platforms;android-34
+            build-tools;34.0.0
 
       - name: 🐘 Setup Gradle 8.6
         uses: gradle/actions/setup-gradle@v4
